@@ -18,6 +18,11 @@ const PRECEDENCE_SENTENCE =
 
 const HOOK_MARKER = "**Model role.**"
 const LOOKUP_COMMAND = "python3 ~/.config/agent-routing/resolve.py <harness> <role id>"
+// An upstream test bans `python3` in this file, so its hook runs the executable script directly.
+const DIRECT_LOOKUP: Record<string, string> = {
+  "skills/ce-riffrec-feedback-analysis/references/extensive-analysis.md":
+    "`~/.config/agent-routing/resolve.py <harness> <role id>`",
+}
 
 // Files whose hook sits directly after upstream's precedence sentence.
 const AFTER_PRECEDENCE = [
@@ -58,6 +63,7 @@ const STANDALONE = [
   "skills/ce-resolve-pr-feedback/references/full-mode.md",
   "skills/ce-retune/references/corpus-audit.md",
   "skills/ce-retune/references/cut-passes.md",
+  "skills/ce-riffrec-feedback-analysis/references/extensive-analysis.md",
   "skills/ce-work/references/execution-strategy.md",
   "skills/ce-work/references/implementation-loop.md",
   "skills/ce-work/references/review-findings-followup.md",
@@ -133,11 +139,22 @@ describe("fork routing hooks", () => {
   test("each hook runs the lookup and falls back to the default", async () => {
     for (const relative of HOOK_FILES) {
       const [hook] = await hookParagraphs(relative)
-      expect(hook).toContain(LOOKUP_COMMAND)
+      expect(hook).toContain(DIRECT_LOOKUP[relative] ?? LOOKUP_COMMAND)
       expect(hook).toContain("model configured for this subagent's role")
       expect(hook).toContain("routing table")
       expect(hook).toContain("not the one whose instruction file you loaded")
+      expect(hook).toMatch(/No output, or a failed command, keeps the (default above|model you would otherwise use)/)
+      expect(hook).toMatch(/If the tool rejects the model, dispatch (that reviewer )?once more/)
     }
+  })
+
+  test("every file carrying upstream's precedence sentence is a hook site", async () => {
+    const tiered: string[] = []
+    for (const file of await markdownFiles(path.join(repoRoot, "skills"))) {
+      const prose = paragraphs(await readFile(file, "utf8")).join("\n\n")
+      if (prose.includes(PRECEDENCE_SENTENCE)) tiered.push(path.relative(repoRoot, file))
+    }
+    expect(tiered.sort()).toEqual([...AFTER_PRECEDENCE, ...Object.keys(POINTED)].sort())
   })
 
   test("a hook after the precedence sentence is the very next paragraph", async () => {

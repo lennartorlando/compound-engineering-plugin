@@ -84,6 +84,7 @@ ce-retune/contract-author
 ce-retune/cut-pass-editor
 ce-retune/cut-proposer
 ce-retune/provenance-defender
+ce-riffrec-feedback-analysis/source-mapper
 ce-simplify-code/code-quality-reviewer
 ce-simplify-code/code-reuse-reviewer
 ce-simplify-code/comment-reviewer
