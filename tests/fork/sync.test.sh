@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
-# Fixture tests for the daily fork sync: scripts/fork/sync.sh plus the push and
-# issue steps of .github/workflows/fork-sync.yml, which run here exactly as
-# written in the workflow (extracted by step id). Every run uses local "upstream"
-# and "fork" repos in a temp dir and a `gh` stub on PATH; nothing touches the network.
+# Fixture tests for the daily fork sync: scripts/fork/sync.sh (sync and checks
+# runs) plus the push and issue steps of .github/workflows/fork-sync.yml, which
+# run here exactly as written in the workflow (extracted by step id); the job
+# conditions between them are asserted statically in scenario 10. Every run uses
+# local "upstream" and "fork" repos in a temp dir and a `gh` stub on PATH;
+# nothing touches the network.
 #   bash tests/fork/sync.test.sh
 set -euo pipefail
 
@@ -14,12 +16,18 @@ ROOT="$(mktemp -d)"
 trap 'rm -rf "$ROOT"' EXIT
 mkdir -p "$ROOT/bin"
 
-# Isolated git identity and config: no user hooks, signing, or default-branch surprises.
+# No inherited git, harness or proxy settings reach the fixtures (a GIT_DIR from
+# a hook would aim them at the outer repo), then isolated git identity and
+# config: no user hooks, signing, or default-branch surprises.
+for v in $(env | sed -nE 's/^((GIT|CODEX|CLAUDE)_[A-Za-z0-9_]*)=.*/\1/p'); do unset "$v"; done
+unset HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY http_proxy https_proxy all_proxy no_proxy
 export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL="$ROOT/gitconfig"
 git config --global user.name "Fixture"
 git config --global user.email "fixture@example.invalid"
 git config --global init.defaultBranch main
 git config --global advice.detachedHead false
+git config --global commit.gpgsign false
+git config --global tag.gpgsign false
 
 FAILS=0
 ok() { echo "ok   $*"; }
@@ -44,6 +52,9 @@ job_block() {   # <job-name>: the job's lines without comments
     /^jobs:/ { injobs = 1; next }
     injobs && /^  [A-Za-z0-9_-]+:/ { cur = $1; sub(":", "", cur) }
     injobs && cur == j && $0 !~ /^ *#/' "$WORKFLOW"
+}
+job_key() {   # <job-name> <key>: the value of a job-level key such as if or needs
+  job_block "$1" | sed -n "s/^    $2: //p"
 }
 step_script push > "$ROOT/push-step.sh"
 step_script report > "$ROOT/report-step.sh"
@@ -142,7 +153,7 @@ EOF
   git -C "$fx/dev" push -q origin personal
 
   cycle "$fx" boot
-  [ "$RESULT" = push ] && [ "$PUSH_RESULT" = success ] || { echo "FAIL $1: bootstrap run did not push (result $RESULT, push $PUSH_RESULT)"; cat "$fx/sync-boot.log"; exit 1; }
+  [ "$RESULT" = push ] && [ "$PUSH_RESULT" = success ] || { echo "FAIL $1: bootstrap run did not push (result $RESULT, push $PUSH_RESULT)"; cat "$fx/sync-boot.log" "$fx/checks-boot.log"; exit 1; }
 }
 
 fork_tip() { git -C "$1/fork.git" rev-parse personal; }
@@ -152,33 +163,51 @@ tip_base() { git -C "$1/fork.git" log -1 --format='%(trailers:key=Upstream-Base,
 fork_json() { git -C "$1/fork.git" show "personal:$2" | jq -r "$3"; }
 version_commits() { git -C "$1/fork.git" log --format=%s "$(upstream_tip "$1")..personal" | grep -c '^fork: build version ' || true; }
 
+# Each job's result as GitHub reports it (success | failure | skipped) and its outcome.
 # The sync job: a fresh full clone of the fork (as actions/checkout does), then sync.sh.
 run_sync() {   # <fixture> <label>
   local fx="$1" label="$2" work="$1/run-$2"
   JOB="$fx/job-$label"
   mkdir -p "$JOB"
   git clone -q -b personal "$fx/fork.git" "$work"
-  if ! (cd "$work" && UPSTREAM_URL="$fx/upstream" FORK_SYNC_CHECKS="${CHECKS:-bash tests/fork/demo.test.sh}" \
-        bash "$SYNC" "$JOB/outcome") > "$fx/sync-$label.log" 2>&1; then
-    echo "FAIL sync.sh exited non-zero in $fx ($label)"; cat "$fx/sync-$label.log"; exit 1
-  fi
-  RESULT="$(cat "$JOB/outcome/result")"
+  SYNC_JOB=success
+  (cd "$work" && UPSTREAM_URL="$fx/upstream" bash "$SYNC" "$JOB/outcome") > "$fx/sync-$label.log" 2>&1 || SYNC_JOB=failure
+  RESULT="$(cat "$JOB/outcome/result" 2>/dev/null || echo none)"
+}
+# The checks job: its own clone of the bundle the sync job produced, then the checks.
+run_checks() {   # <fixture> <label>
+  local fx="$1" label="$2" tree="$1/checks-$2"
+  git clone -q -b personal "$JOB/outcome/sync.bundle" "$tree"
+  CHECKS_JOB=success
+  (cd "$tree" && FORK_SYNC_CHECKS="${CHECKS:-bash tests/fork/demo.test.sh}" bash "$SYNC" checks "$JOB/checks") \
+    > "$fx/checks-$label.log" 2>&1 || CHECKS_JOB=failure
+  CHECKS_OUT="$(cat "$JOB/checks/result" 2>/dev/null || echo none)"
 }
 run_push() {   # <fixture>: the push job's step, against the fixture's fork remote
   (cd "$JOB" && RUNNER_TEMP="$JOB" FORK_SYNC_TOKEN=dummy PUSH_URL="$1/fork.git" \
+    TIP="$(cat "$JOB/outcome/tip")" EXPECTED="$(cat "$JOB/outcome/expected")" \
     bash -eo pipefail "$ROOT/push-step.sh") > "$JOB/push.log" 2>&1
 }
-run_report() {   # <fixture>: the issue step, with the gh stub
-  (cd "$JOB" && RUNNER_TEMP="$JOB" PUSH_RESULT="$PUSH_RESULT" GH_TOKEN=dummy GH_REPO=owner/fork \
-    GITHUB_SERVER_URL=https://github.invalid GITHUB_REPOSITORY=owner/fork GITHUB_RUN_ID=1 \
+# The issue step, with the gh stub; it gets an artifact only from a job that succeeded.
+run_report() {   # <fixture>
+  local temp="$JOB/report"
+  rm -rf "$temp"; mkdir -p "$temp"
+  if [ "$SYNC_JOB" = success ]; then cp -R "$JOB/outcome" "$temp/outcome"; fi
+  if [ "$CHECKS_JOB" = success ]; then cp -R "$JOB/checks" "$temp/checks"; fi
+  (cd "$temp" && RUNNER_TEMP="$temp" SYNC_RESULT="$SYNC_JOB" CHECKS_RESULT="$CHECKS_JOB" PUSH_RESULT="$PUSH_RESULT" \
+    GH_TOKEN=dummy GH_REPO=owner/fork GITHUB_SERVER_URL=https://github.invalid GITHUB_REPOSITORY=owner/fork GITHUB_RUN_ID=1 \
     GH_STUB_DIR="$1/gh" PATH="$ROOT/bin:$PATH" bash -eo pipefail "$ROOT/report-step.sh") > "$JOB/report.log" 2>&1 \
     || { echo "FAIL report step exited non-zero"; cat "$JOB/report.log"; exit 1; }
 }
-cycle() {   # <fixture> <label>: one whole workflow run
+# One whole workflow run; the job conditions it follows are the workflow's (scenario 10).
+cycle() {   # <fixture> <label>
   run_sync "$1" "$2"
-  PUSH_RESULT=skipped
-  if [ "$RESULT" = push ]; then
-    if run_push "$1"; then PUSH_RESULT=success; else PUSH_RESULT=failure; fi
+  CHECKS_JOB=skipped CHECKS_OUT=none PUSH_RESULT=skipped
+  if [ "$SYNC_JOB" = success ] && [ "$RESULT" = push ]; then
+    run_checks "$1" "$2"
+    if [ "$CHECKS_JOB" = success ] && [ "$CHECKS_OUT" = pass ]; then
+      if run_push "$1"; then PUSH_RESULT=success; else PUSH_RESULT=failure; fi
+    fi
   fi
   run_report "$1"
 }
@@ -305,7 +334,8 @@ check "8 new fork commit: new commit directly below it" eq "$(tip_subject "$fx" 
 check "8 new fork commit: old version commit dropped" eq "$(version_commits "$fx")" 1
 check "8 new fork commit: version changed" eq "$([ "$(fork_json "$fx" package.json .version)" != "$old_version" ] && echo changed)" changed
 
-# 10. Workflow: the push token stays in the push job, which runs no bun and no repo script.
+# 10. Workflow: the push token stays in the push job, which runs no bun and no repo script;
+# repository code runs only in the checks job, and the jobs gate each other as cycle() does.
 token_total="$(grep -c FORK_SYNC_TOKEN "$WORKFLOW" || true)"
 token_push="$(job_block push | grep -c FORK_SYNC_TOKEN || true)"
 check "10 workflow: FORK_SYNC_TOKEN is used" eq "$([ "$token_push" -gt 0 ] && echo yes)" yes
@@ -316,12 +346,21 @@ check "10 workflow: push job runs no repo script" eq "$(job_block push | grep -c
 # Without a checkout the runner holds no repository files, so no repo script can run there.
 check "10 workflow: sync job gets a read-only token and keeps no credentials" eq "$(job_block sync | grep -cE 'contents: read|persist-credentials: false')/$(job_block sync | grep -c 'write' || true)" 2/0
 check "10 workflow: issue job checks out no repo code and calls no bun" eq "$(job_block report | grep -cE 'actions/checkout|\bbun\b' || true)" 0
+check "10 workflow: sync job calls no bun and runs no checks" eq "$(job_block sync | grep -cE '\bbun\b|sync\.sh checks' || true)" 0
+check "10 workflow: checks job gets a read-only token and no secret" eq "$(job_block checks | grep -c 'contents: read')/$(job_block checks | grep -cE 'write|secrets\.' || true)" 1/0
+check "10 workflow: checks job hands on its own artifact" eq "$(job_block checks | grep -c 'name: fork-sync-checks$')/$(job_block checks | grep -c 'name: fork-sync-outcome$')" 1/1
+check "10 workflow: checks job runs only after a sync that wants to push" eq "$(job_key checks needs)|$(job_key checks if)" "sync|needs.sync.outputs.result == 'push'"
+check "10 workflow: push needs a sync that wants to push and passing checks" eq "$(job_key push needs)|$(job_key push if)" "[sync, checks]|needs.sync.outputs.result == 'push' && needs.checks.result == 'success' && needs.checks.outputs.result == 'pass'"
+check "10 workflow: push pushes the sha the sync job recorded" eq "$(job_block push | grep -cE 'TIP: \$\{\{ needs\.sync\.outputs\.tip \}\}|EXPECTED: \$\{\{ needs\.sync\.outputs\.expected \}\}|push --force-with-lease="personal:\$EXPECTED" "\$PUSH_URL" "\$TIP:refs/heads/personal"')" 3
+check "10 workflow: report runs after every job unless the run was cancelled" eq "$(job_key report needs)|$(job_key report if)" '[sync, checks, push]|${{ !cancelled() }}'
 
 # 11. The fork moves while the run works: the lease rejects the push.
 make_fixture s11; fx="$ROOT/s11"
 echo one > "$fx/upstream/new1.txt"; upstream_commit "$fx" "upstream one"
 run_sync "$fx" run
 check "11 lease: sync wants to push" eq "$RESULT" push
+run_checks "$fx" run
+check "11 lease: checks pass" eq "$CHECKS_OUT" pass
 dev_sync "$fx"
 echo meanwhile > "$fx/dev/meanwhile.txt"
 git -C "$fx/dev" add -A
@@ -334,15 +373,70 @@ check "11 lease: nothing overwritten" eq "$(fork_tip "$fx")" "$moved"
 run_report "$fx"
 check "11 lease: issue opened for the rejected push" has "$fx/gh/issue-1.md" "push rejected"
 
-# 12. Rebase is clean but a fork test fails.
+# 12. Rebase is clean but a fork test fails in the checks job.
 make_fixture s12; fx="$ROOT/s12"
 echo oops > "$fx/upstream/broken.txt"; upstream_commit "$fx" "upstream adds broken.txt"
 before="$(fork_tip "$fx")"
 cycle "$fx" run
-check "12 red test: result is blocked" eq "$RESULT" blocked
+check "12 red test: sync wants to push" eq "$RESULT" push
+check "12 red test: checks fail" eq "$CHECKS_JOB/$CHECKS_OUT" success/fail
+check "12 red test: push job skipped" eq "$PUSH_RESULT" skipped
 check "12 red test: fork unchanged" eq "$(fork_tip "$fx")" "$before"
+check "12 red test: issue says a check failed" has "$fx/gh/issue-1.md" "check failed"
 check "12 red test: issue names the test" has "$fx/gh/issue-1.md" "tests/fork/demo.test.sh"
-check "12 red test: no bundle handed to the push job" eq "$([ -e "$JOB/outcome/sync.bundle" ] && echo present || echo absent)" absent
+
+# 13. Upstream adds a new release-please version file: no false rename, it gets the fork version.
+make_fixture s13; fx="$ROOT/s13"
+mkdir -p "$fx/upstream/.new-plugin"
+echo '{"name": "demo", "version": "1.0.0"}' | jq . > "$fx/upstream/.new-plugin/plugin.json"
+json_set "$fx/upstream/.github/release-please-config.json" '.packages["."]["extra-files"] += [{"type": "json", "path": ".new-plugin/plugin.json", "jsonpath": "$.version"}]'
+upstream_commit "$fx" "add a new plugin manifest"
+cycle "$fx" run
+check "13 new manifest: result is push" eq "$RESULT" push
+check "13 new manifest: push succeeded" eq "$PUSH_RESULT" success
+check "13 new manifest: new file carries the fork version" eq "$(fork_json "$fx" .new-plugin/plugin.json .version)" "1.0.0-lo.$(git -C "$fx/fork.git" rev-parse --short=7 personal~1)"
+check "13 new manifest: no issue opened" eq "$(issues_created "$fx")" 0
+
+# 14. A check commits and moves personal in its clone: what is pushed is still the sync job's version commit.
+make_fixture s14; fx="$ROOT/s14"
+echo one > "$fx/upstream/new1.txt"; upstream_commit "$fx" "upstream one"
+CHECKS='bash tests/fork/demo.test.sh && echo forged > forged.txt && git add forged.txt && git commit -q -m forged && [ "$(git rev-parse personal)" = "$(git rev-parse HEAD)" ]' cycle "$fx" run
+check "14 check moves personal: checks pass" eq "$CHECKS_OUT" pass
+check "14 check moves personal: push succeeded" eq "$PUSH_RESULT" success
+check "14 check moves personal: pushed tip is the sync job's version commit" eq "$(fork_tip "$fx")" "$(cat "$JOB/outcome/tip")"
+check "14 check moves personal: tip is a version commit" eq "$(tip_subject "$fx" | sed 's/lo\..*/lo./')" "fork: build version 1.0.0-lo."
+
+# 15. A check replaces the sync job's bundle with a forged one: the push job refuses it.
+make_fixture s15; fx="$ROOT/s15"
+echo one > "$fx/upstream/new1.txt"; upstream_commit "$fx" "upstream one"
+before="$(fork_tip "$fx")"
+CHECKS="echo forged > forged.txt && git add forged.txt && git commit -q -m forged && git bundle create -q '$fx/job-run/outcome/sync.bundle' personal" cycle "$fx" run
+check "15 forged bundle: checks pass" eq "$CHECKS_OUT" pass
+check "15 forged bundle: push refused" eq "$PUSH_RESULT" failure
+check "15 forged bundle: push log names the mismatch" has "$JOB/push.log" "not the sha the sync job recorded"
+check "15 forged bundle: fork unchanged" eq "$(fork_tip "$fx")" "$before"
+check "15 forged bundle: issue opened" has "$fx/gh/issue-1.md" "push rejected"
+
+# 16. The sync job crashes (an extra-files entry sync.sh cannot handle): an issue, nothing pushed.
+make_fixture s16; fx="$ROOT/s16"
+json_set "$fx/upstream/.github/release-please-config.json" '.packages["."]["extra-files"] += ["README.md"]'
+upstream_commit "$fx" "add an unsupported extra-files entry"
+before="$(fork_tip "$fx")"
+cycle "$fx" run
+check "16 sync job failed: job failed" eq "$SYNC_JOB" failure
+check "16 sync job failed: checks and push skipped" eq "$CHECKS_JOB/$PUSH_RESULT" skipped/skipped
+check "16 sync job failed: fork unchanged" eq "$(fork_tip "$fx")" "$before"
+check "16 sync job failed: issue opened" has "$fx/gh/issue-1.md" "sync job failure"
+
+# 17. The checks job crashes without an outcome: an issue, nothing pushed.
+make_fixture s17; fx="$ROOT/s17"
+echo one > "$fx/upstream/new1.txt"; upstream_commit "$fx" "upstream one"
+before="$(fork_tip "$fx")"
+CHECKS='kill -9 $PPID' cycle "$fx" run
+check "17 checks job failed: job failed" eq "$CHECKS_JOB" failure
+check "17 checks job failed: push skipped" eq "$PUSH_RESULT" skipped
+check "17 checks job failed: fork unchanged" eq "$(fork_tip "$fx")" "$before"
+check "17 checks job failed: issue opened" has "$fx/gh/issue-1.md" "checks job failure"
 
 if [ "$FAILS" -gt 0 ]; then
   echo "$FAILS check(s) failed"

@@ -3,9 +3,12 @@ name: Fork sync
 # Daily rebase of the fork branch `personal` onto upstream main, with one version
 # commit on top. Procedure and branch layout: scripts/fork/README.md.
 #
-# Token separation: `sync` runs upstream code (the rebased tree's tests) with a
-# read-only token and no secret. `push` alone holds the push token and only pushes the
-# bundle `sync` produced. `report` files every blockage in one issue labeled
+# Job separation: `sync` rebases and writes the version commit with our script,
+# git and jq only, and records the sha to push as a job output. `checks` runs
+# the rebased tree's tests and dependencies (upstream code) with no secret, in
+# its own clone of the bundle, so nothing it does reaches what is pushed.
+# `push` alone holds the push token and pushes only the sha `sync` recorded,
+# only when `checks` passed. `report` files every blockage in one issue labeled
 # fork-sync with GITHUB_TOKEN. Neither `push` nor `report` checks out or runs
 # repository code.
 
@@ -23,11 +26,13 @@ concurrency:
 jobs:
   sync:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 10
     permissions:
       contents: read
     outputs:
       result: ${{ steps.outcome.outputs.result }}
+      tip: ${{ steps.outcome.outputs.tip }}
+      expected: ${{ steps.outcome.outputs.expected }}
 
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
@@ -35,12 +40,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Setup Bun
-        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
-        with:
-          bun-version: latest
-
-      - name: Rebase, version and test
+      - name: Rebase and version
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
@@ -49,9 +49,12 @@ jobs:
       - name: Read the outcome
         id: outcome
         run: |
-          result=$(cat "$RUNNER_TEMP/outcome/result")
+          out="$RUNNER_TEMP/outcome"
+          result=$(cat "$out/result")
           case "$result" in push|noop|blocked) ;; *) echo "::error::unknown sync result: $result"; exit 1 ;; esac
           echo "result=$result" >> "$GITHUB_OUTPUT"
+          echo "expected=$(cat "$out/expected")" >> "$GITHUB_OUTPUT"
+          if [ "$result" = push ]; then echo "tip=$(cat "$out/tip")" >> "$GITHUB_OUTPUT"; fi
 
       - name: Hand the outcome to the next jobs
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -61,9 +64,54 @@ jobs:
           retention-days: 1
           if-no-files-found: error
 
-  push:
+  # Runs upstream code: no secret, no credentials, and its own artifact name, so
+  # it cannot replace the sync outcome (the push job checks the sha anyway).
+  checks:
     needs: sync
     if: needs.sync.outputs.result == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    outputs:
+      result: ${{ steps.outcome.outputs.result }}
+
+    steps:
+      - name: Fetch the outcome
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: fork-sync-outcome
+          path: ${{ runner.temp }}/outcome
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: latest
+
+      - name: Test the new personal
+        run: |
+          git clone -q -b personal "$RUNNER_TEMP/outcome/sync.bundle" "$RUNNER_TEMP/tree"
+          cd "$RUNNER_TEMP/tree"
+          bash scripts/fork/sync.sh checks "$RUNNER_TEMP/checks"
+
+      - name: Read the outcome
+        id: outcome
+        run: |
+          result=$(cat "$RUNNER_TEMP/checks/result")
+          case "$result" in pass|fail) ;; *) echo "::error::unknown checks result: $result"; exit 1 ;; esac
+          echo "result=$result" >> "$GITHUB_OUTPUT"
+
+      - name: Hand the outcome to the report job
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: fork-sync-checks
+          path: ${{ runner.temp }}/checks
+          retention-days: 1
+          if-no-files-found: error
+
+  push:
+    needs: [sync, checks]
+    if: needs.sync.outputs.result == 'push' && needs.checks.result == 'success' && needs.checks.outputs.result == 'pass'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions: {}
@@ -75,25 +123,34 @@ jobs:
           name: fork-sync-outcome
           path: ${{ runner.temp }}/outcome
 
-      # The lease is the personal sha the sync job started from: if personal moved
-      # since, the push is rejected and nothing is overwritten.
+      # Pushes only the sha the sync job recorded, whatever the artifact holds by
+      # now. The lease is the personal sha the sync job started from: if personal
+      # moved since, the push is rejected and nothing is overwritten.
       - name: Push with lease
         id: push
         env:
           FORK_SYNC_TOKEN: ${{ secrets.FORK_SYNC_TOKEN }}
           PUSH_URL: https://github.com/${{ github.repository }}.git
+          TIP: ${{ needs.sync.outputs.tip }}
+          EXPECTED: ${{ needs.sync.outputs.expected }}
         run: |
-          expected=$(cat "$RUNNER_TEMP/outcome/expected")
           repo="$RUNNER_TEMP/push.git"
           git init -q --bare "$repo"
           git -C "$repo" fetch -q "$RUNNER_TEMP/outcome/sync.bundle" "refs/heads/personal:refs/heads/personal"
+          bundled=$(git -C "$repo" rev-parse refs/heads/personal)
+          if [ "$bundled" != "$TIP" ]; then
+            echo "::error::the bundle holds $bundled, not the sha the sync job recorded ($TIP); nothing pushed"
+            exit 1
+          fi
           git -C "$repo" -c credential.helper= \
             -c credential.helper='!f() { echo username=x-access-token; echo "password=$FORK_SYNC_TOKEN"; }; f' \
-            push --force-with-lease="personal:$expected" "$PUSH_URL" "refs/heads/personal:refs/heads/personal"
+            push --force-with-lease="personal:$EXPECTED" "$PUSH_URL" "$TIP:refs/heads/personal"
 
+  # Runs on every outcome except a cancelled run, so a failed or timed-out job
+  # files a report too; nothing is pushed then, as push needs both jobs to pass.
   report:
-    needs: [sync, push]
-    if: always() && needs.sync.result == 'success'
+    needs: [sync, checks, push]
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -101,33 +158,68 @@ jobs:
 
     steps:
       - name: Fetch the outcome
+        if: needs.sync.result == 'success'
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: fork-sync-outcome
           path: ${{ runner.temp }}/outcome
 
-      # report.md came from a job that ran upstream code; it is only quoted, never executed.
+      - name: Fetch the checks outcome
+        if: needs.checks.result == 'success'
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: fork-sync-checks
+          path: ${{ runner.temp }}/checks
+
+      # The checks outcome came from a job that ran upstream code; it is only
+      # compared and quoted, never executed.
       - name: Open, update or close the fork-sync issue
         id: report
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
+          SYNC_RESULT: ${{ needs.sync.result }}
+          CHECKS_RESULT: ${{ needs.checks.result }}
           PUSH_RESULT: ${{ needs.push.result }}
         run: |
           out="$RUNNER_TEMP/outcome"
           run_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
-          result=$(cat "$out/result")
-          if [ "$result" = push ] && [ "$PUSH_RESULT" != success ]; then
+          readme="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/blob/personal/scripts/fork/README.md"
+          job_ended() {   # <job> <result>
             result=blocked
             {
-              echo "## Fork sync blocked: push rejected"
+              echo "## Fork sync blocked: $1 job $2"
               echo
-              echo "The rebase, version commit and checks were clean, but the push to \`personal\` failed ($PUSH_RESULT)."
-              echo "Either \`personal\` moved during the run (the lease on \`$(cat "$out/expected")\` rejected it and nothing was overwritten), or the push token secret is missing or lacks contents and workflows write access."
+              echo "The $1 job ended without an outcome ($2): a crash, a timeout or an unexpected stop. Nothing was pushed."
               echo
-              echo "Check the push job log; after fixing the token, or once \`personal\` is settled, start the workflow again: \`gh workflow run fork-sync.yml -R $GITHUB_REPOSITORY\`."
-              echo "Procedure: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/blob/personal/scripts/fork/README.md"
+              echo "See the run log, fix the cause and start the workflow again: \`gh workflow run fork-sync.yml -R $GITHUB_REPOSITORY\`."
+              echo "Procedure: $readme"
             } > "$out/report.md"
+          }
+          mkdir -p "$out"
+          if [ "$SYNC_RESULT" != success ]; then
+            job_ended sync "$SYNC_RESULT"
+          else
+            result=$(cat "$out/result")
+          fi
+          if [ "$result" = push ]; then
+            if [ "$CHECKS_RESULT" != success ]; then
+              job_ended checks "$CHECKS_RESULT"
+            elif [ "$(cat "$RUNNER_TEMP/checks/result")" != pass ]; then
+              result=blocked
+              cp "$RUNNER_TEMP/checks/report.md" "$out/report.md"
+            elif [ "$PUSH_RESULT" != success ]; then
+              result=blocked
+              {
+                echo "## Fork sync blocked: push rejected"
+                echo
+                echo "The rebase, version commit and checks were clean, but the push to \`personal\` failed ($PUSH_RESULT)."
+                echo "Either \`personal\` moved during the run (the lease on \`$(cat "$out/expected")\` rejected it and nothing was overwritten), the push token secret is missing or lacks contents and workflows write access, or the bundle no longer held the sha the sync job recorded."
+                echo
+                echo "Check the push job log; after fixing the token, or once \`personal\` is settled, start the workflow again: \`gh workflow run fork-sync.yml -R $GITHUB_REPOSITORY\`."
+                echo "Procedure: $readme"
+              } > "$out/report.md"
+            fi
           fi
           issue=$(gh issue list --label fork-sync --state open --json number --jq '.[0].number // empty')
           if [ "$result" = blocked ]; then

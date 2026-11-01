@@ -15,14 +15,23 @@ Fork commits pushed on top of the version commit are fine: the next run drops th
 
 ## The daily run
 
-`.github/workflows/fork-sync.yml` runs at 05:23 UTC and on demand. `scripts/fork/sync.sh` drops the version commit, runs `git rebase --onto upstream/main <Upstream-Base>`, writes a new version commit and runs the checks. Nothing is pushed when any of these blocks:
+`.github/workflows/fork-sync.yml` runs at 05:23 UTC and on demand, in four jobs:
+
+1. **sync** runs `scripts/fork/sync.sh`: it drops the version commit, runs `git rebase --onto upstream/main <Upstream-Base>` and writes a new version commit. It runs only git and jq, no repository code or dependencies, and records the new `personal` sha as a job output.
+2. **checks** clones that result from the sync job's bundle and runs the checks with `bash scripts/fork/sync.sh checks <out-dir>`. This is the only job that runs repository code; it has no secret, and whatever it does in its clone or to the artifacts cannot change what is pushed.
+3. **push** pushes the sha the sync job recorded, and only when the checks passed. It refuses a bundle that holds any other sha.
+4. **report** files the outcome in the issue (below).
+
+Nothing is pushed when any of these blocks:
 
 - the old base is no longer an ancestor of upstream `main` (upstream history rewritten);
 - the rebase conflicts;
-- a marketplace or plugin name in the release-please manifests differs from what `personal` had;
-- a check fails: `bun install --frozen-lockfile`, `bun run release:validate`, `bun run test:skill-guards`, `bun test` on each `tests/fork/*.test.ts`, `bash` on each `tests/fork/*.test.sh`.
+- a marketplace or plugin name in the release-please manifests differs from what `personal` had (a manifest upstream adds is not a rename);
+- a check fails: `bun install --frozen-lockfile`, `bun run release:validate`, `bun run test:skill-guards`, `bun test` on each `tests/fork/*.test.ts`, `bash` on each `tests/fork/*.test.sh`;
+- the sync or checks job fails or times out without an outcome;
+- the push is rejected.
 
-A blockage opens one issue labeled `fork-sync`; later blocked runs comment on it. A clean run, including one with nothing to do, closes it. The push uses `--force-with-lease` on the `personal` sha the run started from, so a branch that moved during the run is never overwritten.
+A blockage opens one issue labeled `fork-sync`; later blocked runs comment on it. A clean run, including one with nothing to do, closes it. A cancelled run reports nothing. The push uses `--force-with-lease` on the `personal` sha the run started from, so a branch that moved during the run is never overwritten.
 
 ## Resolve a blockage
 
@@ -47,6 +56,7 @@ Then by issue type:
 - **Rebase conflict** or **upstream history rewritten**: resolve each stop, `git add <files>`, `git rebase --continue`, until the rebase finishes.
 - **Name changed**: decide whether the fork follows the rename; adapt the fork patches if it does not. The next run compares names against what you push.
 - **Check failed**: fix it in a new fork commit on top.
+- **Sync or checks job failed**: the run log shows the cause, for example an `extra-files` entry `sync.sh` cannot version, or a hung test. Fix it, then start the workflow again.
 
 Run the checks, all green:
 

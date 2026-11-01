@@ -1,14 +1,24 @@
 #!/usr/bin/env bash
+# The daily fork sync in two runs, one per workflow job. Layout and manual
+# resolution: scripts/fork/README.md.
+#
+#   bash scripts/fork/sync.sh <out-dir>
 # Rebases the fork branch `personal` onto upstream main and puts one fresh
-# version commit on top, then runs the fork's checks. Never pushes: it writes
-# the outcome for the workflow's push and issue jobs into <out-dir>:
+# version commit on top. Runs only git and jq, never repository code or
+# dependencies, so nothing the checks run can change what it hands on. Run it
+# from a full clone of the fork with personal checked out and origin pointing
+# at the fork. Never pushes: it writes the outcome for the next jobs into <out-dir>:
 #   result       push | noop | blocked
 #   expected     the fork's personal sha at the start (the push lease)
+#   tip          the new personal sha (push only)
 #   report.md    why the run is blocked (blocked only)
 #   sync.bundle  the new personal branch (push only)
-# Run it from a full clone of the fork with personal checked out and origin
-# pointing at the fork. Layout and manual resolution: scripts/fork/README.md.
-#   bash scripts/fork/sync.sh <out-dir>
+#
+#   bash scripts/fork/sync.sh checks <out-dir>
+# Runs the fork's checks in a clone of that new personal and writes:
+#   result       pass | fail
+#   report.md    which checks failed (fail only)
+#
 # Env: UPSTREAM_URL (default EveryInc upstream), FORK_SYNC_CHECKS (newline-
 # separated commands replacing the default checks; the fixture tests use it).
 set -euo pipefail
@@ -22,13 +32,11 @@ VERSION_SUBJECT="fork: build version "
 # The whole script runs from functions, so bash has parsed it before the
 # rebase rewrites the working tree this file lives in.
 
-blocked() {   # <title> <details (markdown)>
-  echo blocked > "$OUT/result"
+write_report() {   # <title> <details (markdown)>; reads CONTEXT
   {
     echo "## Fork sync blocked: $1"
     echo
-    echo "- Upstream main: \`$UPSTREAM\`"
-    echo "- Fork \`personal\` at run start: \`$START\`"
+    printf '%s\n' "$CONTEXT"
     echo
     printf '%s\n' "$2"
     echo
@@ -36,6 +44,11 @@ blocked() {   # <title> <details (markdown)>
   } > "$OUT/report.md"
   echo "blocked: $1"
   cat "$OUT/report.md"
+}
+
+blocked() {   # <title> <details (markdown)>
+  echo blocked > "$OUT/result"
+  write_report "$1" "$2"
   exit 0
 }
 
@@ -78,15 +91,17 @@ default_checks() {
   return 0
 }
 
-main() {
+sync_run() {   # <out-dir>
   OUT="$1"
   mkdir -p "$OUT"
-  rm -f "$OUT/result" "$OUT/report.md" "$OUT/sync.bundle"
+  rm -f "$OUT/result" "$OUT/report.md" "$OUT/tip" "$OUT/sync.bundle"
 
   git fetch -q --no-tags "$UPSTREAM_URL" "+refs/heads/main:refs/remotes/upstream/main"
   START="$(git rev-parse refs/remotes/origin/personal)"
   UPSTREAM="$(git rev-parse refs/remotes/upstream/main)"
   echo "$START" > "$OUT/expected"
+  CONTEXT="- Upstream main: \`$UPSTREAM\`
+- Fork \`personal\` at run start: \`$START\`"
   git checkout -q -B personal "$START"
 
   # The old base: the version commit's Upstream-Base trailer, or on the first
@@ -114,10 +129,13 @@ main() {
   if [ -n "$version_commit" ]; then rebase_or_block --onto "$version_commit^" "$version_commit"; fi
   rebase_or_block --onto upstream/main "$base"
 
-  local fields renamed="" file path
+  local fields renamed="" file path old
   fields="$(version_fields)"
+  # A version file upstream adds in this run has no names to compare yet.
   for file in $(printf '%s\n' "$fields" | cut -d' ' -f1 | sort -u); do
-    [ "$(names_of "$START" "$file")" = "$(names_of HEAD "$file")" ] || renamed="$renamed$file
+    old="$(names_of "$START" "$file")"
+    [ "$old" = missing ] && continue
+    [ "$old" = "$(names_of HEAD "$file")" ] || renamed="$renamed$file
 "
   done
   if [ -n "$renamed" ]; then
@@ -143,22 +161,40 @@ $(printf '%s' "$renamed" | bullets)"
   version="$(git show upstream/main:package.json | jq -er .version)$suffix"
   git commit -q --no-verify -m "$VERSION_SUBJECT$version" -m "Upstream-Base: $UPSTREAM"
 
-  local checks cmd failed=""
-  checks="${FORK_SYNC_CHECKS:-$(default_checks)}"
+  git bundle create -q "$OUT/sync.bundle" personal
+  git rev-parse personal > "$OUT/tip"
+  echo push > "$OUT/result"
+  echo "push: $version (personal $START -> $(cat "$OUT/tip"), upstream $UPSTREAM)"
+}
+
+# Run from the root of a clone of the new personal; runs repository code.
+checks_run() {   # <out-dir>
+  OUT="$1"
+  mkdir -p "$OUT"
+  rm -f "$OUT/result" "$OUT/report.md"
+  CONTEXT="- Upstream main: \`$(git log -1 --format='%(trailers:key=Upstream-Base,valueonly)' HEAD | sed '/^$/d')\`
+- Checked \`personal\`: \`$(git rev-parse HEAD)\`"
+
+  local list cmd failed=""
+  list="${FORK_SYNC_CHECKS:-$(default_checks)}"
   while IFS= read -r cmd; do
     [ -n "$cmd" ] || continue
     echo "== $cmd"
     bash -c "$cmd" < /dev/null || failed="$failed$cmd
 "
-  done <<< "$checks"
+  done <<< "$list"
   if [ -n "$failed" ]; then
-    blocked "check failed" "The rebase was clean, but these checks failed on the result (output in the workflow run log):
+    echo fail > "$OUT/result"
+    write_report "check failed" "The rebase was clean, but these checks failed on the result (output in the checks job log):
 $(printf '%s' "$failed" | bullets)"
+  else
+    echo pass > "$OUT/result"
   fi
-
-  git bundle create -q "$OUT/sync.bundle" personal
-  echo push > "$OUT/result"
-  echo "push: $version (personal $START -> $(git rev-parse HEAD), upstream $UPSTREAM)"
 }
 
-main "$@"
+if [ "${1:-}" = checks ]; then
+  shift
+  checks_run "$@"
+else
+  sync_run "$@"
+fi
