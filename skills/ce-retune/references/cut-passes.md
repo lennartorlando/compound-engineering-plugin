@@ -14,6 +14,8 @@ A pass applies **one problem class** across the corpus and stops. The work fails
 6. Run the project's own test suite. A pinned string that disappeared is a finding to report with its test path, never a test to edit.
 7. Collect each agent's applied/skipped report. Then measure (Phase 5) and commit the pass alone.
 
+**Model role.** The role ids are `ce-retune/cut-pass-editor` (each per-unit editing agent) and `ce-retune/contract-author` (the agent that writes the contract file, when you delegate it). Before each dispatch, unless the user named a model for it in this conversation, run `python3 ~/.config/agent-routing/resolve.py <harness> <role id>`, where `<harness>` is the tool you are running in (`claude-code`, `grok`, `opencode`, `codex`, `devin` or `muse`), not the one whose instruction file you loaded. A printed model is the model configured for this subagent's role: pass it as the subagent's model and name it in your status note as coming from the routing table. No output, or a failed command, keeps the model you would otherwise use; report any warning once. If the tool rejects the model, dispatch once more without it and say so.
+
 Eight passes landed in the engagement that produced this skill. Every one reduced to the same class. Resist widening a pass to "also fix the obvious thing". A pass that changed two classes cannot be attributed by the next measurement.
 
 ## One problem per agent, disjoint files

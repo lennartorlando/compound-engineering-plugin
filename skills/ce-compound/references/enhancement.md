@@ -10,6 +10,8 @@ This phase is interactive-only: a non-interactive caller has no human-in-the-loo
 
 Based on problem type, optionally dispatch generic subagents seeded with local prompt assets from `references/agents/` to review the documentation. Do not dispatch standalone agents by type/name.
 
+**Model role.** A subagent seeded from a prompt asset in `references/agents/` has the role id `ce-compound/<agent>`, where `<agent>` is the asset's file name without `.md` (`performance-oracle`). The read-only code-simplification review has the role id `ce-compound/doc-simplicity-reviewer`. Before each dispatch, unless the user named a model for it in this conversation, run `python3 ~/.config/agent-routing/resolve.py <harness> <role id>`, where `<harness>` is the tool you are running in (`claude-code`, `grok`, `opencode`, `codex`, `devin` or `muse`), not the one whose instruction file you loaded. A printed model is the model configured for this subagent's role: pass it as the subagent's model and name it in your status note as coming from the routing table. No output, or a failed command, keeps the model you would otherwise use; report any warning once. If the tool rejects the model, dispatch once more without it and say so.
+
 - **performance_issue** → `references/agents/performance-oracle.md`
 - **security_issue** → `references/agents/security-sentinel.md`
 - **database_issue** → `references/agents/data-integrity-guardian.md`

@@ -104,6 +104,8 @@ Every fix-list item ends with one **per-item result** in the return format below
 
 Read [references/agents/pr-comment-resolver.md](agents/pr-comment-resolver.md) and spawn a generic subagent seeded with that fixer prompt for each fix-list item you are delegating. Do not dispatch a standalone agent by type/name. The fixer only implements: the validity judgment is already done, so it implements and returns; it does not re-judge whether the fix is worthwhile.
 
+**Model role.** The role id is `ce-resolve-pr-feedback/pr-comment-resolver` (each fixer subagent). Before each dispatch, unless the user named a model for it in this conversation, run `python3 ~/.config/agent-routing/resolve.py <harness> <role id>`, where `<harness>` is the tool you are running in (`claude-code`, `grok`, `opencode`, `codex`, `devin` or `muse`), not the one whose instruction file you loaded. A printed model is the model configured for this subagent's role: pass it as the subagent's model and name it in your status note as coming from the routing table. No output, or a failed command, keeps the model you would otherwise use; report any warning once. If the tool rejects the model, dispatch once more without it and say so.
+
 Each fixer receives:
 - The feedback_id (thread ID or comment ID) and feedback type.
 - The file path and location fields: `line`, `originalLine`, `startLine`, `originalStartLine` (for outdated threads, the resolved location/anchor from step 3).

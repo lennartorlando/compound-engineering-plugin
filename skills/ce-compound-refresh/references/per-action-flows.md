@@ -82,6 +82,8 @@ When a replacement is needed, read the documentation contract files and pass the
 
 Do not let replacement subagents invent frontmatter fields, enum values, or section order from memory.
 
+**Model role.** The role id is `ce-compound-refresh/successor-writer` (the subagent that writes a replacement or split learning). Before each dispatch, unless the user named a model for it in this conversation, run `python3 ~/.config/agent-routing/resolve.py <harness> <role id>`, where `<harness>` is the tool you are running in (`claude-code`, `grok`, `opencode`, `codex`, `devin` or `muse`), not the one whose instruction file you loaded. A printed model is the model configured for this subagent's role: pass it as the subagent's model and name it in your status note as coming from the routing table. No output, or a failed command, keeps the model you would otherwise use; report any warning once. If the tool rejects the model, dispatch once more without it and say so.
+
 **When evidence is sufficient:**
 
 1. Spawn a single subagent to write the replacement learning. Pass it:

@@ -12,6 +12,8 @@ This skill, not the prompt assets, decides which model tier each subagent uses. 
 
 If the user's or project's active instructions or the live prompt name a model for this subagent, use that model instead of the default tier above. They can name it by the subagent's tier, by its prompt-asset name, or for the subagents being dispatched. Without such an instruction, a model configured for this subagent's role takes precedence over the default tier.
 
+**Model role.** A subagent seeded from a prompt asset in `references/agents/` has the role id `ce-plan/<agent>`, where `<agent>` is the asset's file name without `.md` (`repo-research-analyst`). Before each dispatch, run `python3 ~/.config/agent-routing/resolve.py <harness> <role id>`, where `<harness>` is the tool you are running in (`claude-code`, `grok`, `opencode`, `codex`, `devin` or `muse`), not the one whose instruction file you loaded. A printed model is the model configured for this subagent's role: pass it as the subagent's model and name it in your status note as coming from the routing table. No output, or a failed command, keeps the default above; report any warning once. If the tool rejects the model, dispatch once more with the default and say so.
+
 #### 1.1 Local Research
 
 At every native subagent boundary in this phase, classify a rejected dispatch by whether an agent launched: correct a pre-launch argument rejection once, leave capacity-limited work queued, and otherwise follow that boundary's stated fallback or failed-pass handling.

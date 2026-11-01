@@ -24,6 +24,8 @@ Source 3 is unavailable in a corpus checkout with no history, which is the norma
 
 Keep defenders on a capable model tier. A defender that cannot read a test suite and reconstruct intent from a commit message returns "no provenance found" for everything, which silently converts the audit into a demolition.
 
+**Model role.** The role ids are `ce-retune/cut-proposer` (each wave-1 proposer) and `ce-retune/provenance-defender` (each wave-2 defender). Before each dispatch, unless the user named a model for it in this conversation, run `python3 ~/.config/agent-routing/resolve.py <harness> <role id>`, where `<harness>` is the tool you are running in (`claude-code`, `grok`, `opencode`, `codex`, `devin` or `muse`), not the one whose instruction file you loaded. A printed model is the model configured for this subagent's role: pass it as the subagent's model and name it in your status note as coming from the routing table. No output, or a failed command, keeps the model you would otherwise use; report any warning once. If the tool rejects the model, dispatch once more without it and say so.
+
 ## Finding schema
 
 Per finding:

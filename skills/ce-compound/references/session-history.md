@@ -61,6 +61,8 @@ Resolve two values at runtime with the shell tool before Phase 1 session-history
 
    Use `extract-errors.py` selectively when dead ends or recurring errors are likely useful. Pass only the scratch file paths and metadata to the synthesis subagent.
 
+   **Model role.** The role id is `ce-compound/session-historian` (the synthesis subagent below). Before each dispatch, unless the user named a model for it in this conversation, run `python3 ~/.config/agent-routing/resolve.py <harness> <role id>`, where `<harness>` is the tool you are running in (`claude-code`, `grok`, `opencode`, `codex`, `devin` or `muse`), not the one whose instruction file you loaded. A printed model is the model configured for this subagent's role: pass it as the subagent's model and name it in your status note as coming from the routing table. No output, or a failed command, keeps the model you would otherwise use; report any warning once. If the tool rejects the model, dispatch once more without it and say so.
+
    **Synthesis dispatch.** Build a generic subagent prompt containing:
    - the full content of `references/agents/session-historian.md`
    - `problem_topic`

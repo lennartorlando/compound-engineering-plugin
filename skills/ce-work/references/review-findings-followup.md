@@ -57,6 +57,8 @@ The lead agent decides which findings to act on, groups the work, reviews the di
 
 Dispatch file-grouped subagent batches when fixes need code you have not read, or when fixes on disjoint files form a real parallel wave. Apply every other fix in this context: one whose code is already in your context from this session's work, or a small region you can read without materially growing this context. The lead agent stays active through tests, commits, and the handoff, so loading many cited files here is the cost delegation avoids.
 
+**Model role.** The role ids are `ce-work/review-fix-worker` (each fix batch) and `ce-work/finding-investigator` (a subagent you assign to investigate a finding). Before each dispatch, unless the user named a model for it in this conversation, run `python3 ~/.config/agent-routing/resolve.py <harness> <role id>`, where `<harness>` is the tool you are running in (`claude-code`, `grok`, `opencode`, `codex`, `devin` or `muse`), not the one whose instruction file you loaded. A printed model is the model configured for this subagent's role: pass it as the subagent's model and name it in your status note as coming from the routing table. No output, or a failed command, keeps the model you would otherwise use; report any warning once. If the tool rejects the model, dispatch once more without it and say so.
+
 **Batching (primary rule: group by file):**
 
 1. Sort applicable findings by severity (P0 first).
