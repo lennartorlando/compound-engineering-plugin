@@ -14,9 +14,7 @@ on:
     - cron: "23 5 * * *"
   workflow_dispatch:
 
-permissions:
-  contents: read
-  issues: write
+permissions: {}
 
 concurrency:
   group: fork-sync

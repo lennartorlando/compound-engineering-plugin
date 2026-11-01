@@ -221,7 +221,7 @@ check "3 conflict: one issue created" eq "$(issues_created "$fx")" 1
 check "3 conflict: issue names the file" has "$fx/gh/issue-1.md" notes.txt
 check "3 conflict: issue names the upstream sha" has "$fx/gh/issue-1.md" "$(upstream_tip "$fx")"
 check "3 conflict: issue links the README procedure" has "$fx/gh/issue-1.md" "scripts/fork/README.md"
-check "3 conflict: issue is labeled fork-sync" has "$fx/gh/calls" "--label fork-sync"
+check "3 conflict: issue is labeled fork-sync" eq "$(grep -c '^gh issue create .*--label fork-sync' "$fx/gh/calls" || true)" 1
 
 # 4. A second blocked run comments on the open issue instead of opening another.
 cycle "$fx" conflict2
@@ -314,6 +314,7 @@ check "10 workflow: push job calls no bun" eq "$(job_block push | grep -cw bun |
 check "10 workflow: push job checks out no repo code" eq "$(job_block push | grep -c 'actions/checkout' || true)" 0
 check "10 workflow: push job runs no repo script" eq "$(job_block push | grep -cE 'scripts/|\.sh\b' || true)" 0
 # Without a checkout the runner holds no repository files, so no repo script can run there.
+check "10 workflow: sync job gets a read-only token and keeps no credentials" eq "$(job_block sync | grep -cE 'contents: read|persist-credentials: false')/$(job_block sync | grep -c 'write' || true)" 2/0
 check "10 workflow: issue job checks out no repo code and calls no bun" eq "$(job_block report | grep -cE 'actions/checkout|\bbun\b' || true)" 0
 
 # 11. The fork moves while the run works: the lease rejects the push.

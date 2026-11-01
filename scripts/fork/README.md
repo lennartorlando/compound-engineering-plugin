@@ -35,7 +35,7 @@ git fetch upstream main
 git switch -C personal origin/personal
 lease=$(git rev-parse origin/personal)
 v=$(git log -1 --format=%H --grep='^fork: build version ' upstream/main..personal)
-base=$(git log -1 --format='%(trailers:key=Upstream-Base,valueonly)' "$v" | sed '/^$/d')
+base=$(git log -1 --format='%(trailers:key=Upstream-Base,valueonly)' "$v")
 git rebase --onto "$v^" "$v"            # drop the version commit, keep any commits above it
 git rebase --onto upstream/main "$base" # replay the fork patches
 ```

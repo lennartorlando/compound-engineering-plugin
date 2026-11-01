@@ -62,9 +62,9 @@ version_fields() {
       else error("unsupported extra-files entry: \(tojson)") end' "$CONFIG"
 }
 
-# Marketplace and plugin names in a JSON manifest at a revision ("" = working tree).
+# Marketplace and plugin names in a JSON manifest at a revision.
 names_of() {   # <rev> <file>
-  { if [ -n "$1" ]; then git show "$1:$2"; else cat "$2"; fi; } 2>/dev/null \
+  git show "$1:$2" 2>/dev/null \
     | jq -c '[.name, ((.plugins // []) | map(.name))]' 2>/dev/null || echo missing
 }
 
@@ -94,7 +94,7 @@ main() {
   local version_commit base
   version_commit="$(git log -1 --format=%H --grep="^$VERSION_SUBJECT" upstream/main..personal)"
   if [ -n "$version_commit" ]; then
-    base="$(git log -1 --format='%(trailers:key=Upstream-Base,valueonly)' "$version_commit" | sed '/^$/d')"
+    base="$(git log -1 --format='%(trailers:key=Upstream-Base,valueonly)' "$version_commit")"
   else
     base="$(git merge-base personal upstream/main)"
   fi
@@ -117,7 +117,7 @@ main() {
   local fields renamed="" file path
   fields="$(version_fields)"
   for file in $(printf '%s\n' "$fields" | cut -d' ' -f1 | sort -u); do
-    [ "$(names_of "$START" "$file")" = "$(names_of "" "$file")" ] || renamed="$renamed$file
+    [ "$(names_of "$START" "$file")" = "$(names_of HEAD "$file")" ] || renamed="$renamed$file
 "
   done
   if [ -n "$renamed" ]; then
@@ -162,4 +162,3 @@ $(printf '%s' "$failed" | bullets)"
 }
 
 main "$@"
-exit 0
